@@ -1,0 +1,41 @@
+name: Deploy Névoa Cifras para GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ https://luguppodlfqnnmnwooar.supabase.co }}
+          VITE_SUPABASE_ANON_KEY: ${{ eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1Z3VwcG9kbGZxbm5tbndvb2FyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg0MzE5NDAsImV4cCI6MjEwNDAwNzk0MH0.C-rR3YiFPqZcqOhB_JGis6nrtrcWWe6rnQXnYkKdxNw }}
+          VITE_EDGE_FUNCTION_URL: ${{ https://luguppodlfqnnmnwooar.supabase.co/functions/v1/smooth-function }}
+
+      - name: Deploy para gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          user_name: 'github-actions[bot]'
+          user_email: '41898282+github-actions[bot]@users.noreply.github.com'
