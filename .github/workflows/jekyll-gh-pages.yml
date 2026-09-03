@@ -30,20 +30,15 @@ jobs:
       - name: Instalar dependências
         run: npm ci
 
-      - name: Build
-        env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_EDGE_FUNCTION_URL: ${{ secrets.VITE_EDGE_FUNCTION_URL }}
+      - name: Preparar env
         run: |
-          [ -z "$VITE_SUPABASE_URL" ] && unset VITE_SUPABASE_URL
-          [ -z "$VITE_SUPABASE_ANON_KEY" ] && unset VITE_SUPABASE_ANON_KEY
-          [ -z "$VITE_EDGE_FUNCTION_URL" ] && unset VITE_EDGE_FUNCTION_URL
-          npm run build
-          grep -q 'luguppodlfqnnmnwooar.supabase.co' dist/assets/*.js || {
-            echo "Build sem VITE_SUPABASE_URL. Defina os secrets ou commite .env.production."
-            exit 1
-          }
+          if [ -f env.production ] && [ ! -f .env.production ]; then
+            cp env.production .env.production
+          fi
+          test -f .env.production
+
+      - name: Build
+        run: npm run build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
