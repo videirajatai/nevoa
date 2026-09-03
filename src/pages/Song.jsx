@@ -1,0 +1,600 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { Icon } from '../components/Icons'
+import ChordDiagram from '../components/ChordDiagram'
+import CifraView from '../components/CifraView'
+import { useAuth } from '../hooks/useAuth'
+import { callFetchSong } from '../lib/supabase'
+import { transposeChord } from '../lib/transpose'
+import {
+  getSongById,
+  getSongBySlug,
+  parseSongContent,
+  toggleFavorite,
+  isFavorite,
+  getLists,
+  createList,
+  addSongToList
+} from '../lib/store'
+
+const SETTINGS_KEY = 'nevoa_settings'
+const SPEEDS = [20, 40, 70]
+const SIZES = [16, 18.5, 21.5]
+const INSTRUMENTS = [
+  { id: 'violao', label: 'Violão' },
+  { id: 'guitarra', label: 'Guitarra' },
+  { id: 'teclado', label: 'Teclado' }
+]
+
+function verseToPlain(l, shift) {
+  const words = l.words || []
+  if (!words.length) return []
+  let lyric = ''
+  const starts = []
+  for (let i = 0; i < words.length; i++) {
+    starts.push(lyric.length)
+    lyric += words[i]
+    if (i < words.length - 1) lyric += ' '
+  }
+  const at = l.chordAt || []
+  if (!at.length) return [lyric]
+  const line = new Array(lyric.length).fill(' ')
+  for (const c of at) {
+    const col = starts[c.wi]
+    const name = (c.names || []).map(shift).join('/')
+    for (let k = 0; k < name.length && col + k < line.length; k++) line[col + k] = name[k]
+  }
+  return [line.join(''), lyric]
+}
+
+function buildPlainText(song, lines, eff) {
+  const shift = (name) => transposeChord(name, eff)
+  const out = []
+  const variant = song.version === 'simplificada' ? ' (versão simplificada)' : ''
+  out.push(`${song.artist} - ${song.title}${variant}`)
+  if (song.tuning) out.push(`Afinação: ${song.tuning}`)
+  if (song.cifraclub_url) out.push(`Fonte: ${song.cifraclub_url}`)
+  out.push('')
+  for (const l of lines) {
+    if (l.kind === 'blank') {
+      out.push('')
+    } else if (l.kind === 'label') {
+      out.push(`[${l.text}]`)
+    } else if (l.kind === 'verse') {
+      for (const ln of verseToPlain(l, shift)) out.push(ln)
+    } else if (l.kind === 'chords') {
+      let t = l.text || ''
+      for (const c of l.chords || []) t = t.replace(c, shift(c))
+      out.push(t)
+    } else {
+      out.push(l.text || '')
+    }
+  }
+  return out.join('\n')
+}
+
+function loadSettings() {
+  try {
+    return { shift: 0, capo: 0, auto: false, speed: 1, scale: 1, instrument: 'violao', ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }
+  } catch {
+    return { shift: 0, capo: 0, auto: false, speed: 1, scale: 1, instrument: 'violao' }
+  }
+}
+
+export default function Song() {
+  const { songId } = useParams()
+  const nav = useNavigate()
+  const { user } = useAuth()
+
+  const [settings, setSettings] = useState(loadSettings)
+  const [song, setSong] = useState(null)
+  const [status, setStatus] = useState('loading')
+  const [message, setMessage] = useState('')
+  const [fav, setFav] = useState(false)
+  const [chord, setChord] = useState(null)
+  const [listOpen, setListOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
+  const [lists, setLists] = useState([])
+  const [newList, setNewList] = useState('')
+  const [addedIds, setAddedIds] = useState([])
+  const [toast, setToast] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const { shift, capo, auto, speed, scale, instrument } = settings
+  const eff = shift - capo
+  const fontSize = SIZES[scale]
+  const pxSpeed = SPEEDS[speed]
+
+  const persist = (patch) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch }
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(next))
+      } catch {}
+      return next
+    })
+  }
+
+  useEffect(() => {
+    ;(async () => {
+      setStatus('loading')
+      setSong(null)
+      setFav(false)
+      setChord(null)
+      try {
+        const s = await getSongById(songId)
+        if (!s) throw new Error('Cifra não encontrada.')
+        setSong(s)
+        if (user) isFavorite(s.id).then(setFav)
+        setStatus('ok')
+      } catch (e) {
+        setMessage(e?.message || 'Não foi possível carregar esta cifra.')
+        setStatus('error')
+      }
+    })()
+  }, [songId, user])
+
+  // auto-scroll suave
+  useEffect(() => {
+    if (!auto) return
+    let raf
+    let last = null
+    const step = (ts) => {
+      if (last == null) last = ts
+      const dt = ts - last
+      last = ts
+      window.scrollBy(0, (pxSpeed * dt) / 1000)
+      raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [auto, pxSpeed])
+
+  // modo apresentação
+  const togglePresent = async () => {
+    const root = document.getElementById('presentation-root')
+    try {
+      if (!document.fullscreenElement) {
+        document.body.classList.add('presentation')
+        await (root?.requestFullscreen?.() || Promise.resolve())
+      } else {
+        await document.exitFullscreen?.()
+      }
+    } catch {
+      document.body.classList.remove('presentation')
+    }
+  }
+  useEffect(() => {
+    const onExit = () => document.body.classList.remove('presentation')
+    document.addEventListener('fullscreenchange', onExit)
+    return () => document.removeEventListener('fullscreenchange', onExit)
+  }, [])
+
+  const openLists = async () => {
+    setListOpen(true)
+    try {
+      setLists(await getLists())
+    } catch {
+      setLists([])
+    }
+  }
+
+  const handleCreateList = async () => {
+    const name = newList.trim()
+    if (!name) return
+    const list = await createList(name)
+    setLists((prev) => [list, ...prev])
+    setNewList('')
+  }
+
+  const handleAdd = async (list) => {
+    if (!song) return
+    try {
+      await addSongToList(list.id, song.id)
+      setAddedIds((prev) => [...prev, list.id])
+      showToast(`Adicionada em "${list.name}"`)
+    } catch (e) {
+      showToast(e?.message || 'Erro ao adicionar.')
+    }
+  }
+
+  const showToast = (t) => {
+    setToast(t)
+    setTimeout(() => setToast(''), 2200)
+  }
+
+  const goVersion = async (v) => {
+    if (!song) return
+    if ((song.version || 'original') === v) return
+    setStatus('scraping')
+    try {
+      let s = await getSongBySlug(song.slug_artist, song.slug_title, v)
+      if (!s) {
+        const res = await callFetchSong({
+          artist: song.slug_artist,
+          title: song.slug_title,
+          version: v
+        })
+        s = res.song
+      }
+      if (!s?.id) throw new Error('Cifra não encontrada.')
+      nav(`/song/${s.id}`)
+      window.scrollTo(0, 0)
+    } catch (e) {
+      setMessage(e?.message || 'Não foi possível carregar esta versão.')
+      setStatus('error')
+    }
+  }
+
+  const shareText = () => {
+    if (!song) return ''
+    const variant = song.version === 'simplificada' ? ' (simplificada)' : ''
+    return `${song.artist} - ${song.title}${variant} — cifra no Névoa Cifras: ${window.location.href}`
+  }
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href)
+      setCopied(true)
+      showToast('Link copiado!')
+    } catch {
+      showToast('Não foi possível copiar.')
+    }
+  }
+
+  const shareNative = async () => {
+    try {
+      if (!navigator.share) throw new Error('unsupported')
+      await navigator.share({ title: song ? `${song.artist} - ${song.title}` : 'Névoa Cifras', text: shareText(), url: window.location.href })
+    } catch {
+      setShareOpen(true)
+    }
+  }
+
+  const downloadTxt = () => {
+    if (!song) return
+    const lines = parseSongContent(song)
+    const text = buildPlainText(song, lines, eff)
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `${song.slug_artist}-${song.slug_title}${song.version === 'simplificada' ? '-simplificada' : ''}.txt`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(a.href)
+    showToast('Baixando arquivo .txt')
+  }
+
+  const printPage = () => {
+    window.print()
+  }
+
+  const setShare = (open) => {
+    setShareOpen(open)
+    setCopied(false)
+  }
+
+  const onFav = async () => {
+    if (!song) return
+    if (!user) {
+      nav('/auth')
+      return
+    }
+    try {
+      const now = await toggleFavorite(song.id)
+      setFav(now)
+      showToast(now ? 'Adicionada aos favoritos' : 'Removida dos favoritos')
+    } catch (e) {
+      showToast(e?.message || 'Erro.')
+    }
+  }
+
+  const youtubeHref = useMemo(() => {
+    if (!song) return '#'
+    if (song.youtube_url) return song.youtube_url
+    return `https://www.youtube.com/results?search_query=${encodeURIComponent(`${song.artist} ${song.title}`)}`
+  }, [song])
+
+  if (status === 'loading' || status === 'scraping') {
+    return (
+      <div className="page center-page" id="presentation-root">
+        <div className="spinner" />
+        <p>{status === 'scraping' ? 'Buscando a cifra no Cifra Club...' : 'Carregando...'}</p>
+        {status === 'scraping' && <p className="muted small">A primeira busca pode demorar alguns segundos.</p>}
+      </div>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <div className="page center-page" id="presentation-root">
+        <p className="big-icon"><Icon name="music" size={40} /></p>
+        <h2>Não achamos essa cifra</h2>
+        <p className="muted">{message}</p>
+        <div className="row">
+          <button className="btn btn-primary" onClick={() => nav('/')}>
+            Buscar outra
+          </button>
+          {song?.version === 'simplificada' && (
+            <button className="btn" onClick={() => goVersion('original')}>
+              Ver versão original
+            </button>
+          )}
+          <button className="btn" onClick={() => nav(-1)}>
+            Voltar
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const version = song.version === 'simplificada' ? 'simplificada' : 'original'
+  const toneLabel = song.tone_root ? transposeChord(song.tone_root, eff) : null
+  const lines = parseSongContent(song)
+
+  return (
+    <div id="presentation-root" className="song-page" style={{ fontSize: `${fontSize}px` }}>
+      <header className="song-head">
+        <button className="icon-btn" onClick={() => nav(-1)} aria-label="Voltar">
+          <Icon name="back" size={22} />
+        </button>
+        <div className="song-head-titles">
+          <h1>{song.title}</h1>
+          <span>{song.artist}</span>
+        </div>
+        <button className={`icon-btn ${fav ? 'fav-on' : ''}`} onClick={onFav} aria-label="Favoritar">
+          <Icon name="heart" size={22} />
+        </button>
+        <button className="icon-btn" onClick={openLists} aria-label="Adicionar a uma lista">
+          <Icon name="plus" size={22} />
+        </button>
+        <a className="icon-btn" href={youtubeHref} target="_blank" rel="noreferrer" aria-label="YouTube">
+          <Icon name="youtube" size={22} />
+        </a>
+      </header>
+
+      <div className="song-meta">
+        {toneLabel && (
+          <span className="chip">
+            Tom <b>{toneLabel}</b>
+          </span>
+        )}
+        {capo > 0 && <span className="chip">Capotraste <b>{capo}ª casa</b></span>}
+        <span className="chip">Afinação {song.tuning || 'padrão'}</span>
+        <a className="chip link" href={song.cifraclub_url} target="_blank" rel="noreferrer">
+          {song.version === 'simplificada' ? 'Simplificada no Cifra Club' : 'Original no Cifra Club'}
+        </a>
+      </div>
+
+      <div className="print-only" id="print-header">
+        <p className="print-head-title">
+          {song.artist} - {song.title}
+          {version === 'simplificada' ? ' (versão simplificada)' : ''}
+        </p>
+        <p className="print-head-meta">
+          {toneLabel ? `Tom: ${toneLabel}` : ''}
+          {capo > 0 ? ` • Capotraste: ${capo}ª casa` : ''}
+          {` • Afinação: ${song.tuning || 'padrão'}`}
+          {' • Névoa Cifras'}
+        </p>
+      </div>
+
+      <div className="toolbar">
+        <div className="toolbar-row">
+          <div className="seg">
+            <button className={version === 'original' ? 'seg-btn on' : 'seg-btn'} onClick={() => goVersion('original')}>
+              Original
+            </button>
+            <button className={version === 'simplificada' ? 'seg-btn on' : 'seg-btn'} onClick={() => goVersion('simplificada')}>
+              Simplificada
+            </button>
+          </div>
+          <span className="grow" />
+          <button className="icon-btn sm" onClick={() => setShare(true)} aria-label="Compartilhar">
+            <Icon name="share" size={18} />
+          </button>
+          <button className="icon-btn sm" onClick={printPage} aria-label="Imprimir">
+            <Icon name="printer" size={18} />
+          </button>
+          <button className="icon-btn sm" onClick={downloadTxt} aria-label="Baixar arquivo .txt">
+            <Icon name="download" size={18} />
+          </button>
+        </div>
+        <div className="toolbar-row">
+          <div className="seg">
+            {INSTRUMENTS.map((ins) => (
+              <button
+                key={ins.id}
+                className={instrument === ins.id ? 'seg-btn on' : 'seg-btn'}
+                onClick={() => persist({ instrument: ins.id })}
+              >
+                {ins.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="toolbar-row wrap">
+          <div className="ctl">
+            <span className="ctl-label">Tom</span>
+            <button className="icon-btn sm" onClick={() => persist({ shift: Math.max(-11, shift - 1) })}>
+              <Icon name="a-down" size={18} />
+            </button>
+            <span className="ctl-value">{eff > 0 ? `+${eff}` : eff}</span>
+            <button className="icon-btn sm" onClick={() => persist({ shift: Math.min(11, shift + 1) })}>
+              <Icon name="a-up" size={18} />
+            </button>
+          </div>
+
+          <div className="ctl">
+            <span className="ctl-label">Capo</span>
+            <button className="icon-btn sm" onClick={() => persist({ capo: Math.max(0, capo - 1) })}>
+              <Icon name="a-down" size={18} />
+            </button>
+            <span className="ctl-value">{capo}</span>
+            <button className="icon-btn sm" onClick={() => persist({ capo: Math.min(9, capo + 1) })}>
+              <Icon name="a-up" size={18} />
+            </button>
+          </div>
+
+          <div className="ctl grow">
+            <span className="ctl-label">Letra</span>
+            <button className="icon-btn sm" onClick={() => persist({ scale: Math.max(0, scale - 1) })}>
+              <Icon name="a-down" size={18} />
+            </button>
+            <span className="ctl-value">{SIZES[scale].toFixed(1).replace('.', ',')}</span>
+            <button className="icon-btn sm" onClick={() => persist({ scale: Math.min(2, scale + 1) })}>
+              <Icon name="a-up" size={18} />
+            </button>
+          </div>
+
+          {(shift !== 0 || capo !== 0) && (
+            <button className="btn ghost sm-btn" onClick={() => persist({ shift: 0, capo: 0 })}>
+              Resetar
+            </button>
+          )}
+        </div>
+
+        <div className="toolbar-row wrap">
+          <div className="ctl">
+            <button
+              className={`icon-btn sm ${auto ? 'on' : ''}`}
+              onClick={() => persist({ auto: !auto })}
+              aria-label="Rolagem automática"
+            >
+              <Icon name="repeat" size={18} />
+            </button>
+            <span className="ctl-label">{auto ? 'Rolando' : 'Auto-scroll'}</span>
+          </div>
+          <div className="ctl grow">
+            <input
+              type="range"
+              min={0}
+              max={2}
+              step={1}
+              value={speed}
+              onChange={(e) => persist({ speed: +e.target.value })}
+              aria-label="Velocidade do auto-scroll"
+            />
+            <span className="ctl-label">{pxSpeed}px/s</span>
+          </div>
+          <button className="icon-btn sm" onClick={togglePresent} aria-label="Tela cheia">
+            <Icon name="fullscreen" size={20} />
+          </button>
+        </div>
+      </div>
+
+      {lines.length === 0 ? (
+        <p className="muted center">Esta cifra está vazia ou ainda não foi carregada.</p>
+      ) : (
+        <CifraView lines={lines} shift={eff} onChord={setChord} />
+      )}
+
+      <footer className="song-footer">
+        <a href={song.cifraclub_url} target="_blank" rel="noreferrer">
+          Cifra via Cifra Club
+        </a>
+        <span>Névoa Cifras</span>
+      </footer>
+
+      {chord && (
+        <div className="sheet-backdrop" onClick={() => setChord(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <button className="icon-btn sheet-close" onClick={() => setChord(null)} aria-label="Fechar">
+              <Icon name="close" size={20} />
+            </button>
+            <ChordDiagram chord={chord} instrument={instrument} />
+          </div>
+        </div>
+      )}
+
+      {shareOpen && (
+        <div className="sheet-backdrop" onClick={() => setShare(false)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <h3 className="sheet-title">Compartilhar e imprimir</h3>
+            <div className="sheet-list">
+              <button className="sheet-row sheet-action" onClick={copyLink}>
+                <span className="grow">Copiar link</span>
+                <span className={copied ? 'chip ok' : 'chip'}>{copied ? 'Copiado' : <Icon name="link" size={16} />}</span>
+              </button>
+              <a
+                className="sheet-row sheet-action"
+                href={`https://wa.me/?text=${encodeURIComponent(shareText())}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <span className="grow">WhatsApp</span>
+                <Icon name="wa" size={18} />
+              </a>
+              {navigator.share && (
+                <button className="sheet-row sheet-action" onClick={shareNative}>
+                  <span className="grow">Mais opções...</span>
+                  <Icon name="share" size={18} />
+                </button>
+              )}
+              <button className="sheet-row sheet-action" onClick={printPage}>
+                <span className="grow">Imprimir</span>
+                <Icon name="printer" size={18} />
+              </button>
+              <button className="sheet-row sheet-action" onClick={downloadTxt}>
+                <span className="grow">Baixar arquivo .txt</span>
+                <Icon name="download" size={18} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {listOpen && (
+        <div className="sheet-backdrop" onClick={() => setListOpen(false)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <h3 className="sheet-title">Adicionar à lista</h3>
+            {!user ? (
+              <p className="muted">
+                <button className="btn-link" onClick={() => nav('/auth')}>
+                  Entre com sua conta
+                </button>{' '}
+                para criar listas.
+              </p>
+            ) : (
+              <>
+                <div className="row">
+                  <input
+                    className="grow"
+                    value={newList}
+                    placeholder="Nome da nova lista"
+                    onChange={(e) => setNewList(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleCreateList()}
+                  />
+                  <button className="btn btn-primary btn-icon" onClick={handleCreateList} aria-label="Criar lista">
+                    <Icon name="plus" size={18} />
+                  </button>
+                </div>
+                <div className="sheet-list">
+                  {lists.length === 0 && <p className="muted">Você ainda não tem listas.</p>}
+                  {lists.map((l) => (
+                    <div key={l.id} className="sheet-row">
+                      <span className="grow">
+                        {l.name} <small className="muted">({l.count})</small>
+                      </span>
+                      {addedIds.includes(l.id) ? (
+                        <span className="chip ok">Adicionada</span>
+                      ) : (
+                        <button className="btn ghost sm-btn" onClick={() => handleAdd(l)}>
+                          Adicionar
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  )
+}
