@@ -59,10 +59,11 @@ function ChordLine({ line, shift, onChord }) {
   )
 }
 
-export default function CifraView({ lines, shift = 0, onChord }) {
+export default function CifraView({ lines, shift = 0, onChord, hideTabs = true }) {
   return (
     <div className="cifra">
       {lines.map((line, i) => {
+        if (line.kind === 'tab' && hideTabs) return null
         switch (line.kind) {
           case 'label':
             return (
@@ -79,6 +80,12 @@ export default function CifraView({ lines, shift = 0, onChord }) {
               <p key={i} className="cifra-meta">
                 {line.text}
               </p>
+            )
+          case 'tab':
+            return (
+              <pre key={i} className="cifra-tab">
+                {line.text}
+              </pre>
             )
           case 'blank':
             return <div key={i} className="cifra-gap" />

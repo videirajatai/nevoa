@@ -148,7 +148,7 @@ function cifraUrls(slugArtist, slugTitle, version) {
   return urls
 }
 
-async function scrapeSong({ slugArtist, slugTitle, version }) {
+async function scrapeSong({ slugArtist, slugTitle, version, resolved }) {
   const isSimplificada = version === 'simplificada'
   const urls = cifraUrls(slugArtist, slugTitle, version)
   let res = null
@@ -164,6 +164,29 @@ async function scrapeSong({ slugArtist, slugTitle, version }) {
   }
 
   if (!res || res.status === 404) {
+    if (resolved) {
+      const err = new Error(
+        isSimplificada
+          ? 'Esta música não tem versão simplificada no Cifra Club.'
+          : 'Não encontramos essa música no Cifra Club. Confira o artista e o título.'
+      )
+      err.status = 404
+      throw err
+    }
+    const artistSlug = asSlug(slugArtist)
+    const page = await fetchCc(`${artistSlug}/`)
+    if (page.ok) {
+      const realArtist = firstSegFromUrl(page.finalUrl) || artistSlug
+      const tokens = tokenize(String(slugTitle).replace(/-/g, ' '))
+      let found = matchSongSlug(page.html, realArtist, tokens)
+      if (!found) {
+        const all = await fetchCc(`${realArtist}/musicas.html`)
+        if (all.ok) found = matchSongSlug(all.html, realArtist, tokens)
+      }
+      if (found) {
+        return scrapeSong({ slugArtist: realArtist, slugTitle: found, version, resolved: true })
+      }
+    }
     const err = new Error(
       isSimplificada
         ? 'Esta música não tem versão simplificada no Cifra Club.'
@@ -296,64 +319,34 @@ function notFoundError() {
   return err
 }
 
-function titleCaseWords(text) {
-  return String(text || '')
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ')
+function cleanTrackName(name) {
+  return String(name || '')
+    .replace(/\s*\((?:live|ao vivo|acoustic|ac[uú]stico|remix|radio edit|oficial)[^)]*\)/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
 }
 
-function parseDdgHits(html) {
-  const hits = []
+async function searchItunesHits(q) {
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=10&country=BR`
+  const res = await fetch(url, { headers: { Accept: 'application/json' } })
+  if (!res.ok) return []
+  const data = await res.json().catch(() => ({}))
+  const out = []
   const seen = new Set()
-  const skip = /letra|partitura|discografia|videoaula|musicas\.html|simplificada|bass|guitarpro|cifra-de/
-  const re = /uddg=([^&"]+)/g
-  let m
-  while ((m = re.exec(html))) {
-    let url = ''
-    try {
-      url = decodeURIComponent(m[1])
-    } catch {
-      continue
-    }
-    const path = url.match(/cifraclub\.com\.br\/([a-z0-9-]+)\/([a-z0-9-]+)\/?/i)
-    if (!path) continue
-    const slugArtist = path[1]
-    const slugTitle = path[2]
-    if (!slugArtist || !slugTitle || skip.test(slugTitle) || skip.test(slugArtist)) continue
-    const key = `${slugArtist}|${slugTitle}`
+  for (const r of data.results || []) {
+    const artist = String(r.artistName || '').split(',')[0].trim()
+    const title = cleanTrackName(r.trackName)
+    if (!artist || !title) continue
+    const key = `${artist.toLowerCase()}|${title.toLowerCase()}`
     if (seen.has(key)) continue
     seen.add(key)
-    hits.push({
-      artist: titleCaseWords(slugArtist),
-      title: titleCaseWords(slugTitle.replace(/-+$/, '')),
-      slug_artist: slugArtist,
-      slug_title: slugTitle
+    out.push({
+      artist,
+      title,
+      image_url: r.artworkUrl100 ? String(r.artworkUrl100).replace('100x100', '200x200') : null
     })
-    if (hits.length >= 10) break
   }
-
-  const titles = html.matchAll(/class="result__a"[^>]*>([\s\S]*?)<\/a>/g)
-  let i = 0
-  for (const t of titles) {
-    if (i >= hits.length) break
-    const plain = String(t[1] || '')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/\s+/g, ' ')
-      .trim()
-      .replace(/\s*[-|]\s*Cifra Club.*$/i, '')
-    const parts = plain.split(/\s+-\s+/)
-    if (parts.length >= 2) {
-      hits[i].title = parts[0].trim()
-      hits[i].artist = parts.slice(1).join(' - ').trim()
-    }
-    i++
-  }
-  return hits
+  return out
 }
 
 async function searchHits(client, q) {
@@ -373,37 +366,25 @@ async function searchHits(client, q) {
     .order('created_at', { ascending: false })
     .limit(10)
 
-  const localHits = local || []
   const merged = []
   const seen = new Set()
-  for (const row of localHits) {
-    const key = `${row.slug_artist}|${row.slug_title}`
+  for (const row of local || []) {
+    const key = `${String(row.artist).toLowerCase()}|${String(row.title).toLowerCase()}`
     if (seen.has(key)) continue
     seen.add(key)
     merged.push(row)
   }
 
   try {
-    const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`site:cifraclub.com.br ${query}`)}`
-    const res = await fetch(ddgUrl, {
-      headers: {
-        'User-Agent': UA,
-        Accept: 'text/html',
-        'Accept-Language': 'pt-BR,pt;q=0.9'
-      }
-    })
-    if (res.ok) {
-      const html = await res.text()
-      for (const hit of parseDdgHits(html)) {
-        const key = `${hit.slug_artist}|${hit.slug_title}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        merged.push(hit)
-        if (merged.length >= 10) break
-      }
+    for (const hit of await searchItunesHits(query)) {
+      const key = `${hit.artist.toLowerCase()}|${hit.title.toLowerCase()}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(hit)
+      if (merged.length >= 10) break
     }
   } catch {
-    // se o DuckDuckGo falhar, devolve só o catálogo
+    // iTunes indisponível: devolve só o catálogo
   }
 
   return { hits: merged.slice(0, 10), source: merged.length ? 'search' : 'empty' }

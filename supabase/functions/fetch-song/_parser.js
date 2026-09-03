@@ -1,7 +1,3 @@
-// Parser para páginas de cifra do Cifra Club.
-// Entrada: HTML bruto da página /artists/song (versão principal).
-// Saída: estrutura "content" pronta para o frontend renderizar de forma fluida.
-
 const ENTITIES = {
   amp: '&',
   lt: '<',
@@ -12,31 +8,48 @@ const ENTITIES = {
 }
 
 export function unescapeHtml(s) {
-  let out = String(s).replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+  return String(s)
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
     .replace(/&#([0-9]+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
-    .replace(/&(amp|lt|gt|quot|apos|nbsp);/gi, (m, name) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[name.toLowerCase()])
-  return out
+    .replace(/&(amp|lt|gt|quot|apos|nbsp);/gi, (_, name) => ENTITIES[name.toLowerCase()] || '')
 }
 
-// Dividir o HTML do bloco em pedaços de texto e marcadores de acorde.
+function looksLikeTabLine(text) {
+  const t = String(text || '').trim()
+  if (!t) return false
+  if (/^\[?\s*tab\b/i.test(t)) return true
+  if (/^[eEBGDA]\s*[|:].*[-0-9]/.test(t)) return true
+  if (/^[a-gA-G]\|[-0-9hpbrx/\\~+| ]+$/.test(t)) return true
+  const bars = (t.match(/\|/g) || []).length
+  const leftover = t.replace(/[-0-9|hpbrx/\\~:\s()+]/gi, '')
+  return bars >= 2 && /-{3,}/.test(t) && leftover.length <= 2
+}
+
+function stripExceptBold(html) {
+  return String(html || '')
+    .replace(/<div[^>]*class="[^"]*tabs?[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '\n')
+    .replace(/<(?:span|div)[^>]*class="[^"]*tab[^"]*"[^>]*>[\s\S]*?<\/(?:span|div)>/gi, '\n')
+    .replace(/<(?!\/?b\b)[^>]+>/gi, (tag) => (/^<br/i.test(tag) ? '\n' : ''))
+}
+
 function scanTokens(blockHtml) {
   const tokens = []
+  const cleaned = stripExceptBold(blockHtml)
   const tagRe = /<b\b([^>]*)>([\s\S]*?)<\/b>/gi
   let last = 0
   let m
-  while ((m = tagRe.exec(blockHtml))) {
-    if (m.index > last) tokens.push({ type: 'text', s: unescapeHtml(blockHtml.slice(last, m.index)) })
+  while ((m = tagRe.exec(cleaned))) {
+    if (m.index > last) tokens.push({ type: 'text', s: unescapeHtml(cleaned.slice(last, m.index)) })
     const attrs = m[1]
     const visible = unescapeHtml(m[2].replace(/<[^>]+>/g, ''))
     const attrName = (attrs.match(/data-chord-name="([^"]*)"/) || [])[1]
     tokens.push({ type: 'chord', name: attrName || visible, text: visible })
     last = tagRe.lastIndex
   }
-  if (last < blockHtml.length) tokens.push({ type: 'text', s: unescapeHtml(blockHtml.slice(last)) })
+  if (last < cleaned.length) tokens.push({ type: 'text', s: unescapeHtml(cleaned.slice(last)) })
   return tokens
 }
 
-// Converte tokens de um bloco em linhas (row = { chords:[{name,col}], text }).
 function tokensToRows(tokens) {
   const rows = []
   let parts = []
@@ -60,7 +73,6 @@ function tokensToRows(tokens) {
         }
       }
     } else {
-      // insere o nome do acorde na coluna atual (preserva alinhamento)
       chords.push({ name: tok.name, col })
       for (const ch of tok.text) {
         parts.push(ch)
@@ -84,7 +96,6 @@ function tokenizeWords(lineText) {
   return words
 }
 
-// Associa cada acorde à palavra sobre a qual ele deve aparecer.
 function mapChordsToWords(words, chordList) {
   const chordAt = []
   for (const c of chordList) {
@@ -102,6 +113,7 @@ export function parseCifraHtml(html) {
   const preMatch = html.match(/<pre[^>]*data-chord-content="true"[^>]*>([\s\S]*?)<\/pre>/i)
   if (!preMatch) throw new Error('Conteúdo da cifra não encontrado na página.')
   const preInner = preMatch[1]
+    .replace(/<div[^>]*class="[^"]*tabs?[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '\n[Tab]\n')
 
   const blockRe = /<div class="kvMV">([\s\S]*?)<\/div>/gi
   const rows = []
@@ -113,6 +125,7 @@ export function parseCifraHtml(html) {
   const lines = []
   let tuning = null
   let toneRoot = null
+  let inTab = false
 
   const pushPlain = (raw) => {
     const text = raw.replace(/\s+$/, '')
@@ -121,8 +134,19 @@ export function parseCifraHtml(html) {
       return
     }
     const t = text.trim()
-    if (t.startsWith('[')) {
+    if (/^\[?\s*tab\b/i.test(t) || looksLikeTabLine(t)) {
+      inTab = /^\[?\s*tab\b/i.test(t) ? true : inTab
+      lines.push({ kind: 'tab', text: t })
+      if (/^\[/.test(t) && !/^\[?\s*tab\b/i.test(t)) inTab = false
+      return
+    }
+    if (t.startsWith('[') && !/^\[?\s*tab\b/i.test(t)) {
+      inTab = false
       lines.push({ kind: 'label', text: t })
+      return
+    }
+    if (inTab) {
+      lines.push({ kind: 'tab', text: t })
       return
     }
     const af = t.match(/^afinação\s*:?\s*(.*)$/i)
@@ -138,20 +162,25 @@ export function parseCifraHtml(html) {
   while (i < rows.length) {
     const row = rows[i]
     const text = row.text
+    if (looksLikeTabLine(text) || inTab) {
+      pushPlain(text)
+      i += 1
+      continue
+    }
     if (row.chords.length) {
       const next = rows[i + 1]
       const hasLyricNext =
         next &&
         next.chords.length === 0 &&
         next.text.replace(/\s+$/, '') !== '' &&
-        !next.text.trim().startsWith('[')
+        !next.text.trim().startsWith('[') &&
+        !looksLikeTabLine(next.text)
       if (hasLyricNext) {
         const lyricText = next.text.replace(/\s+$/, '')
         const words = tokenizeWords(lyricText)
         const chordAt = mapChordsToWords(words, row.chords)
         for (const c of row.chords) {
           const idx = (c.name.match(/^[A-Ga-g][#b]?/) || [])[0]
-          if (idx && toneRoot === null) toneRoot = idx
           if (idx) toneRoot = idx
         }
         lines.push({
@@ -163,7 +192,6 @@ export function parseCifraHtml(html) {
         i += 2
         continue
       }
-      // linha só de acordes (progressão / solo)
       lines.push({ kind: 'chords', text: text.replace(/\s+$/, ''), chords: row.chords.map((c) => c.name) })
       i += 1
       continue

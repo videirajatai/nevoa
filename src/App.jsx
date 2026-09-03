@@ -7,6 +7,7 @@ import Song from './pages/Song'
 import Lists from './pages/Lists'
 import ListDetail from './pages/ListDetail'
 import Favorites from './pages/Favorites'
+import Tuner from './pages/Tuner'
 import AuthPage from './pages/AuthPage'
 import Profile from './pages/Profile'
 
@@ -14,6 +15,7 @@ const NAV = [
   { to: '/', icon: 'home', label: 'Início', end: true },
   { to: '/lists', icon: 'list', label: 'Listas' },
   { to: '/favorites', icon: 'heart', label: 'Favoritos' },
+  { to: '/tuner', icon: 'tuner', label: 'Afinador' },
   { to: '/me', icon: 'user', label: 'Conta' }
 ]
 
@@ -29,6 +31,7 @@ function Layout() {
           <Route path="/lists" element={<RequireAuth><Lists /></RequireAuth>} />
           <Route path="/lists/:id" element={<RequireAuth><ListDetail /></RequireAuth>} />
           <Route path="/favorites" element={<RequireAuth><Favorites /></RequireAuth>} />
+          <Route path="/tuner" element={<Tuner />} />
           <Route path="/auth" element={<AuthPage />} />
           <Route path="/me" element={<Profile />} />
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -32,7 +32,8 @@ body.presentation .bottom-nav,
 body.presentation .song-head,
 body.presentation .song-meta,
 body.presentation .toolbar,
-body.presentation .song-footer {
+body.presentation .song-footer,
+body.presentation .song-nav {
   display: none !important;
 }
 body.presentation .song-page {
@@ -329,9 +330,120 @@ a:hover { text-decoration: underline; }
 .chip b { color: var(--text); }
 .chip.link { text-decoration: none; color: var(--accent-2); }
 .chip.ok { color: var(--lime); }
+.chip-btn { cursor: pointer; }
+.chip-btn:active { border-color: var(--accent); }
+.ctl-link { cursor: pointer; background: none; border: none; padding: 0; font: inherit; color: inherit; }
+.ctl-value.ctl-link { min-width: 34px; }
+.btn.on-soft { border-color: var(--accent); color: var(--accent-2); }
+
+.cifra-tab {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72em;
+  color: var(--muted);
+  background: var(--bg-3);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  margin: 0.3em 0;
+  white-space: pre;
+}
+
+.key-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+.key-btn {
+  padding: 10px 0;
+  border-radius: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 13px;
+}
+.key-btn.on { background: var(--accent); color: #fff; border-color: transparent; }
+
+.song-nav {
+  position: fixed;
+  right: 14px;
+  bottom: calc(18px + var(--safe));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 35;
+}
+.song-nav-btn {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: rgba(26, 32, 41, 0.92);
+  border: 1px solid var(--line);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.song-nav-btn:disabled { opacity: 0.25; }
+
+.tuner-page { align-items: stretch; }
+.tuner-gauge {
+  position: relative;
+  height: 210px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.tuner-arc {
+  width: 220px;
+  height: 110px;
+  border: 8px solid var(--bg-3);
+  border-bottom: none;
+  border-top-left-radius: 220px;
+  border-top-right-radius: 220px;
+}
+.tuner-needle {
+  position: absolute;
+  bottom: 72px;
+  width: 4px;
+  height: 88px;
+  background: var(--c, var(--accent));
+  border-radius: 4px;
+  transform-origin: 50% 100%;
+  transform: rotate(var(--needle, 0deg));
+  transition: transform 0.08s linear;
+}
+.tuner-note { font-size: 42px; font-weight: 800; line-height: 1; }
+.tuner-hz { color: var(--muted); margin: 0 0 8px; font-size: 13px; }
+.tuner-strings {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.tuner-strings .seg-btn {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 6px;
+}
 
 /* ---------- song page ---------- */
 .song-page { max-width: 760px; margin: 0 auto; padding: 14px 16px 60px; }
+.song-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--bg);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.song-modal .song-page { padding-bottom: 90px; }
+body.song-modal-open { overflow: hidden; }
+body.song-modal-open .bottom-nav { display: none !important; }
+body.song-modal-open .toast { bottom: calc(18px + var(--safe)); }
 .song-head {
   display: flex; align-items: center; gap: 10px;
   position: sticky; top: 0; z-index: 20;
@@ -532,7 +644,7 @@ a:hover { text-decoration: underline; }
   @page { margin: 12mm; }
   html, body { background: #fff !important; }
   body, .app, .song-page { color: #111 !important; }
-  .app-nav, .song-head, .toolbar, .song-footer, .sheet-backdrop, .toast, .bottom-nav { display: none !important; }
+  .app-nav, .song-head, .toolbar, .song-footer, .sheet-backdrop, .toast, .bottom-nav, .song-nav { display: none !important; }
   .print-only { display: block !important; padding-bottom: 10px; border-bottom: 1px solid #bbb; margin-bottom: 12px; }
   .print-head-title { margin: 0; font-size: 17px; font-weight: 800; }
   .print-head-meta { margin: 4px 0 0; font-size: 12px; color: #333; }

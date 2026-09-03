@@ -2,15 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Icon } from '../components/Icons'
 import SongCard from '../components/SongCard'
-import { callSearchSong, callFetchSong } from '../lib/supabase'
-import { listRecentSongs } from '../lib/store'
+import { useAuth } from '../hooks/useAuth'
+import { callFetchSong } from '../lib/supabase'
+import { listRecentSongs, searchSongsLocal } from '../lib/store'
+import { searchItunes, mergeHits } from '../lib/musicSearch'
 
 function hitKey(h) {
-  return `${h.slug_artist || ''}|${h.slug_title || ''}|${h.id || ''}`
+  return `${h.slug_artist || ''}|${h.slug_title || ''}|${h.id || ''}|${h.artist}|${h.title}`
 }
 
 export default function Home() {
   const nav = useNavigate()
+  const { user } = useAuth()
   const [q, setQ] = useState('')
   const [recent, setRecent] = useState([])
   const [hits, setHits] = useState([])
@@ -21,12 +24,16 @@ export default function Home() {
   const lastQ = useRef('')
 
   useEffect(() => {
-    listRecentSongs()
+    if (!user) {
+      setRecent([])
+      return
+    }
+    listRecentSongs(user.id)
       .then(setRecent)
       .catch((e) => {
         setSetupHint(/does not exist|relation|Failed to fetch|fetch/i.test(String(e?.message || e)))
       })
-  }, [])
+  }, [user])
 
   useEffect(() => {
     clearTimeout(deb.current)
@@ -38,7 +45,7 @@ export default function Home() {
     }
     deb.current = setTimeout(() => {
       runSearch(value, false)
-    }, 380)
+    }, 320)
     return () => clearTimeout(deb.current)
   }, [q])
 
@@ -50,10 +57,10 @@ export default function Home() {
         nav(`/song/${hit.id}`)
         return
       }
-      setNotice('Abrindo a cifra...')
+      setNotice('Abrindo a cifra no Cifra Club...')
       const res = await callFetchSong({
-        artist: hit.slug_artist || hit.artist,
-        title: hit.slug_title || hit.title
+        artist: hit.artist,
+        title: hit.title
       })
       const s = res?.song
       if (!s?.id) throw new Error('Não encontramos essa cifra.')
@@ -73,13 +80,12 @@ export default function Home() {
       setNotice('Procurando cifras...')
     }
     try {
-      const res = await callSearchSong(value)
+      const [local, remote] = await Promise.all([
+        searchSongsLocal(value, 10).catch(() => []),
+        searchItunes(value, 10).catch(() => [])
+      ])
       if (lastQ.current !== value) return
-      const list = Array.isArray(res?.hits)
-        ? res.hits
-        : res?.song
-          ? [res.song]
-          : []
+      const list = mergeHits(local, remote)
       setHits(list)
       setSetupHint(false)
       if (fromSubmit && list.length === 1) {
@@ -94,7 +100,6 @@ export default function Home() {
     } catch (e) {
       if (lastQ.current !== value) return
       setNotice(e?.message || 'Não foi possível buscar agora.')
-      setSetupHint(/Failed to fetch|fetch/i.test(String(e?.message || e)))
     } finally {
       if (fromSubmit) setBusy(false)
     }
@@ -172,9 +177,12 @@ export default function Home() {
       )}
 
       <section className="recent">
-        <h2 className="section-title">Adicionadas recentemente</h2>
+        <h2 className="section-title">Recentes</h2>
         {busy && <p className="muted">Buscando cifra...</p>}
-        {recent.length === 0 && !busy && !setupHint && (
+        {!user && !busy && (
+          <p className="muted">Entre na sua conta para ver as cifras que você abriu.</p>
+        )}
+        {user && recent.length === 0 && !busy && !setupHint && (
           <p className="muted">Nenhuma cifra ainda. Busque uma música para começar.</p>
         )}
         <div className="card-grid">

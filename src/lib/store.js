@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { slugVariants } from './slug'
+import { sanitizeCifraLines } from './cifraSanitize'
 
 export async function getProfile() {
   const { data: { user } } = await supabase.auth.getUser()
@@ -92,15 +93,37 @@ export async function getSongBySlug(slugArtist, slugTitle, version = 'original')
   return null
 }
 
-export async function listRecentSongs(limit = 12) {
+const recentsKey = (userId) => `nevoa_recents_${userId || 'anon'}`
+
+function readRecentIds(userId) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(recentsKey(userId)) || '[]')
+    return Array.isArray(raw) ? raw.filter((id) => typeof id === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export function recordRecentSong(song, userId) {
+  if (!song?.id || !userId) return
+  const ids = readRecentIds(userId).filter((id) => id !== song.id)
+  ids.unshift(song.id)
+  try {
+    localStorage.setItem(recentsKey(userId), JSON.stringify(ids.slice(0, 24)))
+  } catch {}
+}
+
+export async function listRecentSongs(userId, limit = 12) {
+  if (!userId) return []
+  const ids = readRecentIds(userId).slice(0, limit)
+  if (!ids.length) return []
   const { data, error } = await supabase
     .from('songs')
-    .select('id, artist, title, slug_artist, slug_title, youtube_url, image_url, tone_root')
-    .eq('version', 'original')
-    .order('created_at', { ascending: false })
-    .limit(limit)
+    .select('id, artist, title, slug_artist, slug_title, youtube_url, image_url, tone_root, version')
+    .in('id', ids)
   if (error) throw error
-  return data || []
+  const byId = new Map((data || []).map((s) => [s.id, s]))
+  return ids.map((id) => byId.get(id)).filter(Boolean)
 }
 
 export function parseSongContent(song) {
@@ -112,7 +135,7 @@ export function parseSongContent(song) {
       lines = []
     }
   }
-  return Array.isArray(lines) ? lines : []
+  return sanitizeCifraLines(Array.isArray(lines) ? lines : [])
 }
 
 // ------------------------- Listas -------------------------
@@ -172,7 +195,10 @@ export async function addSongToList(listId, songId) {
   const { error } = await supabase
     .from('list_songs')
     .insert({ list_id: listId, song_id: songId, position })
-  if (error) throw error
+  if (error) {
+    if (error.code === '23505') return
+    throw error
+  }
 }
 
 export async function removeSongFromList(listSongId) {

@@ -55,3 +55,20 @@ export function transposeChord(name, semitones) {
 export function noteName(semitone) {
   return SHARP[(((semitone % 12) + 12) % 12)]
 }
+
+export const MAJOR_KEYS = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B']
+export const MINOR_KEYS = ['Cm', 'C#m', 'Dm', 'Ebm', 'Em', 'Fm', 'F#m', 'Gm', 'G#m', 'Am', 'Bbm', 'Bm']
+
+export function keySemitone(name) {
+  const c = parseChord(name)
+  return c ? c.semitone : null
+}
+
+export function shiftToKey(fromName, toName, capo = 0) {
+  const from = keySemitone(fromName)
+  const to = keySemitone(toName)
+  if (from == null || to == null) return 0
+  let delta = ((to - from + capo) % 12 + 12) % 12
+  if (delta > 6) delta -= 12
+  return delta
+}

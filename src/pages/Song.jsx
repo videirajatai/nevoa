@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icons'
 import ChordDiagram from '../components/ChordDiagram'
 import CifraView from '../components/CifraView'
 import { useAuth } from '../hooks/useAuth'
 import { callFetchSong } from '../lib/supabase'
-import { transposeChord } from '../lib/transpose'
+import { hasTabs } from '../lib/cifraSanitize'
+import { MAJOR_KEYS, MINOR_KEYS, shiftToKey, transposeChord } from '../lib/transpose'
 import {
   getSongById,
   getSongBySlug,
@@ -14,11 +15,13 @@ import {
   isFavorite,
   getLists,
   createList,
-  addSongToList
+  addSongToList,
+  getListWithSongs,
+  recordRecentSong
 } from '../lib/store'
 
 const SETTINGS_KEY = 'nevoa_settings'
-const SPEEDS = [20, 40, 70]
+const SPEEDS = [6, 10, 14, 20, 28, 40, 55, 70]
 const SIZES = [16, 18.5, 21.5]
 const INSTRUMENTS = [
   { id: 'violao', label: 'Violão' },
@@ -66,6 +69,8 @@ function buildPlainText(song, lines, eff) {
       let t = l.text || ''
       for (const c of l.chords || []) t = t.replace(c, shift(c))
       out.push(t)
+    } else if (l.kind === 'tab') {
+      out.push(l.text || '')
     } else {
       out.push(l.text || '')
     }
@@ -75,14 +80,22 @@ function buildPlainText(song, lines, eff) {
 
 function loadSettings() {
   try {
-    return { shift: 0, capo: 0, auto: false, speed: 1, scale: 1, instrument: 'violao', ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }
+    return {
+      shift: 0,
+      capo: 0,
+      auto: false,
+      speed: 2,
+      scale: 1,
+      instrument: 'violao',
+      hideTabs: true,
+      ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')
+    }
   } catch {
-    return { shift: 0, capo: 0, auto: false, speed: 1, scale: 1, instrument: 'violao' }
+    return { shift: 0, capo: 0, auto: false, speed: 2, scale: 1, instrument: 'violao', hideTabs: true }
   }
 }
 
-export default function Song() {
-  const { songId } = useParams()
+export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, embedded = false }) {
   const nav = useNavigate()
   const { user } = useAuth()
 
@@ -94,16 +107,19 @@ export default function Song() {
   const [chord, setChord] = useState(null)
   const [listOpen, setListOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+  const [toneOpen, setToneOpen] = useState(false)
   const [lists, setLists] = useState([])
   const [newList, setNewList] = useState('')
   const [addedIds, setAddedIds] = useState([])
   const [toast, setToast] = useState('')
   const [copied, setCopied] = useState(false)
+  const [neighbors, setNeighbors] = useState({ prev: null, next: null })
 
-  const { shift, capo, auto, speed, scale, instrument } = settings
+  const { shift, capo, auto, speed, scale, instrument, hideTabs } = settings
+  const speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, Number(speed) || 0))
   const eff = shift - capo
   const fontSize = SIZES[scale]
-  const pxSpeed = SPEEDS[speed]
+  const pxSpeed = SPEEDS[speedIdx]
 
   const persist = (patch) => {
     setSettings((prev) => {
@@ -125,6 +141,7 @@ export default function Song() {
         const s = await getSongById(songId)
         if (!s) throw new Error('Cifra não encontrada.')
         setSong(s)
+        recordRecentSong(s, user?.id)
         if (user) isFavorite(s.id).then(setFav)
         setStatus('ok')
       } catch (e) {
@@ -134,23 +151,62 @@ export default function Song() {
     })()
   }, [songId, user])
 
-  // auto-scroll suave
+  useEffect(() => {
+    const fromPlaylist = Array.isArray(playlistIds) ? playlistIds.filter(Boolean) : null
+    if (fromPlaylist?.length) {
+      const idx = fromPlaylist.indexOf(songId)
+      if (idx === -1) return
+      setNeighbors({
+        prev: idx > 0 ? fromPlaylist[idx - 1] : null,
+        next: idx < fromPlaylist.length - 1 ? fromPlaylist[idx + 1] : null
+      })
+      return
+    }
+    if (!listId) {
+      setNeighbors({ prev: null, next: null })
+      return
+    }
+    let cancelled = false
+    getListWithSongs(listId)
+      .then((list) => {
+        if (cancelled || !list) return
+        const ids = (list.items || []).map((it) => it.song?.id).filter(Boolean)
+        const idx = ids.indexOf(songId)
+        setNeighbors({
+          prev: idx > 0 ? ids[idx - 1] : null,
+          next: idx >= 0 && idx < ids.length - 1 ? ids[idx + 1] : null
+        })
+      })
+      .catch(() => setNeighbors({ prev: null, next: null }))
+    return () => {
+      cancelled = true
+    }
+  }, [listId, songId, playlistIds])
+
+  useEffect(() => {
+    if (!embedded) return
+    document.body.classList.add('song-modal-open')
+    return () => document.body.classList.remove('song-modal-open')
+  }, [embedded])
+
   useEffect(() => {
     if (!auto) return
     let raf
     let last = null
+    const scroller = embedded ? document.querySelector('.song-modal') : window
     const step = (ts) => {
       if (last == null) last = ts
       const dt = ts - last
       last = ts
-      window.scrollBy(0, (pxSpeed * dt) / 1000)
+      const dy = (pxSpeed * dt) / 1000
+      if (scroller === window) window.scrollBy(0, dy)
+      else if (scroller) scroller.scrollTop += dy
       raf = requestAnimationFrame(step)
     }
     raf = requestAnimationFrame(step)
     return () => cancelAnimationFrame(raf)
-  }, [auto, pxSpeed])
+  }, [auto, pxSpeed, embedded])
 
-  // modo apresentação
   const togglePresent = async () => {
     const root = document.getElementById('presentation-root')
     try {
@@ -218,12 +274,37 @@ export default function Song() {
         s = res.song
       }
       if (!s?.id) throw new Error('Cifra não encontrada.')
-      nav(`/song/${s.id}`)
-      window.scrollTo(0, 0)
+      goToSong(s.id)
     } catch (e) {
       setMessage(e?.message || 'Não foi possível carregar esta versão.')
       setStatus('error')
     }
+  }
+
+  const goToSong = (id) => {
+    if (!id) return
+    if (onReplaceSong) onReplaceSong(id)
+    else nav(`/song/${id}${listId ? `?list=${listId}` : ''}`, { replace: true })
+    if (embedded) {
+      const root = document.querySelector('.song-modal')
+      if (root) root.scrollTop = 0
+    } else {
+      window.scrollTo(0, 0)
+    }
+  }
+
+  const goBack = () => {
+    if (onBack) onBack()
+    else if (listId) nav(`/lists/${listId}`)
+    else nav(-1)
+  }
+
+  const goNeighbor = (id) => goToSong(id)
+
+  const pickKey = (keyName) => {
+    if (!song?.tone_root) return
+    persist({ shift: shiftToKey(song.tone_root, keyName, capo) })
+    setToneOpen(false)
   }
 
   const shareText = () => {
@@ -321,7 +402,7 @@ export default function Song() {
               Ver versão original
             </button>
           )}
-          <button className="btn" onClick={() => nav(-1)}>
+          <button className="btn" onClick={goBack}>
             Voltar
           </button>
         </div>
@@ -332,11 +413,14 @@ export default function Song() {
   const version = song.version === 'simplificada' ? 'simplificada' : 'original'
   const toneLabel = song.tone_root ? transposeChord(song.tone_root, eff) : null
   const lines = parseSongContent(song)
+  const songHasTabs = hasTabs(lines)
+  const visibleLines = hideTabs ? lines.filter((l) => l.kind !== 'tab') : lines
+  const currentKey = toneLabel || song.tone_root || ''
 
   return (
-    <div id="presentation-root" className="song-page" style={{ fontSize: `${fontSize}px` }}>
+    <div id="presentation-root" className={`song-page${embedded ? ' song-page-embed' : ''}`} style={{ fontSize: `${fontSize}px` }}>
       <header className="song-head">
-        <button className="icon-btn" onClick={() => nav(-1)} aria-label="Voltar">
+        <button className="icon-btn" onClick={goBack} aria-label="Voltar">
           <Icon name="back" size={22} />
         </button>
         <div className="song-head-titles">
@@ -356,9 +440,9 @@ export default function Song() {
 
       <div className="song-meta">
         {toneLabel && (
-          <span className="chip">
+          <button type="button" className="chip chip-btn" onClick={() => setToneOpen(true)}>
             Tom <b>{toneLabel}</b>
-          </span>
+          </button>
         )}
         {capo > 0 && <span className="chip">Capotraste <b>{capo}ª casa</b></span>}
         <span className="chip">Afinação {song.tuning || 'padrão'}</span>
@@ -417,11 +501,15 @@ export default function Song() {
 
         <div className="toolbar-row wrap">
           <div className="ctl">
-            <span className="ctl-label">Tom</span>
+            <button type="button" className="ctl-label ctl-link" onClick={() => song.tone_root && setToneOpen(true)}>
+              Tom
+            </button>
             <button className="icon-btn sm" onClick={() => persist({ shift: Math.max(-11, shift - 1) })}>
               <Icon name="a-down" size={18} />
             </button>
-            <span className="ctl-value">{eff > 0 ? `+${eff}` : eff}</span>
+            <button type="button" className="ctl-value ctl-link" onClick={() => song.tone_root && setToneOpen(true)}>
+              {eff > 0 ? `+${eff}` : eff}
+            </button>
             <button className="icon-btn sm" onClick={() => persist({ shift: Math.min(11, shift + 1) })}>
               <Icon name="a-up" size={18} />
             </button>
@@ -471,24 +559,32 @@ export default function Song() {
             <input
               type="range"
               min={0}
-              max={2}
+              max={SPEEDS.length - 1}
               step={1}
-              value={speed}
+              value={speedIdx}
               onChange={(e) => persist({ speed: +e.target.value })}
               aria-label="Velocidade do auto-scroll"
             />
             <span className="ctl-label">{pxSpeed}px/s</span>
           </div>
+          {songHasTabs && (
+            <button
+              className={`btn ghost sm-btn ${hideTabs ? '' : 'on-soft'}`}
+              onClick={() => persist({ hideTabs: !hideTabs })}
+            >
+              {hideTabs ? 'Mostrar tabs' : 'Ocultar tabs'}
+            </button>
+          )}
           <button className="icon-btn sm" onClick={togglePresent} aria-label="Tela cheia">
             <Icon name="fullscreen" size={20} />
           </button>
         </div>
       </div>
 
-      {lines.length === 0 ? (
+      {visibleLines.length === 0 ? (
         <p className="muted center">Esta cifra está vazia ou ainda não foi carregada.</p>
       ) : (
-        <CifraView lines={lines} shift={eff} onChord={setChord} />
+        <CifraView lines={lines} shift={eff} onChord={setChord} hideTabs={hideTabs} />
       )}
 
       <footer className="song-footer">
@@ -498,6 +594,27 @@ export default function Song() {
         <span>Névoa Cifras</span>
       </footer>
 
+      {listId && (neighbors.prev || neighbors.next) && (
+        <div className="song-nav">
+          <button
+            className="song-nav-btn"
+            disabled={!neighbors.prev}
+            onClick={() => goNeighbor(neighbors.prev)}
+            aria-label="Música anterior da lista"
+          >
+            <Icon name="prev" size={22} />
+          </button>
+          <button
+            className="song-nav-btn"
+            disabled={!neighbors.next}
+            onClick={() => goNeighbor(neighbors.next)}
+            aria-label="Próxima música da lista"
+          >
+            <Icon name="next" size={22} />
+          </button>
+        </div>
+      )}
+
       {chord && (
         <div className="sheet-backdrop" onClick={() => setChord(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -505,6 +622,30 @@ export default function Song() {
               <Icon name="close" size={20} />
             </button>
             <ChordDiagram chord={chord} instrument={instrument} />
+          </div>
+        </div>
+      )}
+
+      {toneOpen && (
+        <div className="sheet-backdrop" onClick={() => setToneOpen(false)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <h3 className="sheet-title">Escolher tom</h3>
+            <p className="muted small">Maior</p>
+            <div className="key-grid">
+              {MAJOR_KEYS.map((k) => (
+                <button key={k} className={currentKey === k ? 'key-btn on' : 'key-btn'} onClick={() => pickKey(k)}>
+                  {k}
+                </button>
+              ))}
+            </div>
+            <p className="muted small">Menor</p>
+            <div className="key-grid">
+              {MINOR_KEYS.map((k) => (
+                <button key={k} className={currentKey === k ? 'key-btn on' : 'key-btn'} onClick={() => pickKey(k)}>
+                  {k}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -597,4 +738,11 @@ export default function Song() {
       {toast && <div className="toast">{toast}</div>}
     </div>
   )
+}
+
+export default function Song() {
+  const { songId } = useParams()
+  const [params] = useSearchParams()
+  const listId = params.get('list')
+  return <SongView songId={songId} listId={listId} />
 }
