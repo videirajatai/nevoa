@@ -27,9 +27,10 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_SUPABASE_URL: ${{ https://luguppodlfqnnmnwooar.supabase.co }}
-          VITE_SUPABASE_ANON_KEY: ${{ eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1Z3VwcG9kbGZxbm5tbndvb2FyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg0MzE5NDAsImV4cCI6MjEwNDAwNzk0MH0.C-rR3YiFPqZcqOhB_JGis6nrtrcWWe6rnQXnYkKdxNw }}
-          VITE_EDGE_FUNCTION_URL: ${{ https://luguppodlfqnnmnwooar.supabase.co/functions/v1/smooth-function }}
+        VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+        VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        VITE_EDGE_FUNCTION_URL: ${{ secrets.VITE_EDGE_FUNCTION_URL }}
+
 
       - name: Deploy para gh-pages
         uses: peaceiris/actions-gh-pages@v4
