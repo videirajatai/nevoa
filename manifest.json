@@ -1,7 +1,7 @@
 {
   "name": "Névoa Cifras",
   "short_name": "Névoa Cifras",
-  "start_url": "nevoa/index.html",
+  "start_url": "/nevoa/index.html",
   "display": "standalone",
   "theme_color": "#0f172a",
   "background_color": "#f1f5f9",
