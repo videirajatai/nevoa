@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icons'
 import ChordDiagram from '../components/ChordDiagram'
@@ -7,6 +7,10 @@ import { useAuth } from '../hooks/useAuth'
 import { callFetchSong } from '../lib/supabase'
 import { hasTabs } from '../lib/cifraSanitize'
 import { MAJOR_KEYS, MINOR_KEYS, shiftToKey, transposeChord } from '../lib/transpose'
+import { attachWakeLock } from '../lib/wakeLock'
+import { createMetronome, tapTempo } from '../lib/metronome'
+import { readCachedSong } from '../lib/songCache'
+import { loadListTone } from '../lib/listTone'
 import {
   getSongById,
   getSongBySlug,
@@ -17,12 +21,14 @@ import {
   createList,
   addSongToList,
   getListWithSongs,
-  recordRecentSong
+  recordRecentSong,
+  updateListSongTone
 } from '../lib/store'
 
 const SETTINGS_KEY = 'nevoa_settings'
 const SPEEDS = [6, 10, 14, 20, 28, 40, 55, 70]
-const SIZES = [16, 18.5, 21.5]
+const SIZES = [11, 12.5, 14, 16, 18.5, 21.5]
+const DEFAULT_SCALE = 2
 const INSTRUMENTS = [
   { id: 'violao', label: 'Violão' },
   { id: 'guitarra', label: 'Guitarra' },
@@ -78,20 +84,42 @@ function buildPlainText(song, lines, eff) {
   return out.join('\n')
 }
 
+function clampScale(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return DEFAULT_SCALE
+  return Math.max(0, Math.min(SIZES.length - 1, Math.round(n)))
+}
+
 function loadSettings() {
+  const defaults = {
+    shift: 0,
+    capo: 0,
+    auto: false,
+    speed: 2,
+    scale: DEFAULT_SCALE,
+    instrument: 'violao',
+    hideTabs: true,
+    fontScaleV2: true,
+    bpm: 90
+  }
   try {
-    return {
-      shift: 0,
-      capo: 0,
-      auto: false,
-      speed: 2,
-      scale: 1,
-      instrument: 'violao',
-      hideTabs: true,
-      ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')
+    const next = { ...defaults, ...saved }
+    if (saved.fontScaleV2) {
+      next.scale = clampScale(saved.scale)
+    } else if (saved.scale == null || saved.scale === 1) {
+      next.scale = DEFAULT_SCALE
+    } else if (saved.scale === 0) {
+      next.scale = 3
+    } else if (saved.scale === 2) {
+      next.scale = 5
+    } else {
+      next.scale = clampScale(saved.scale)
     }
+    next.fontScaleV2 = true
+    return next
   } catch {
-    return { shift: 0, capo: 0, auto: false, speed: 2, scale: 1, instrument: 'violao', hideTabs: true }
+    return defaults
   }
 }
 
@@ -114,11 +142,23 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
   const [toast, setToast] = useState('')
   const [copied, setCopied] = useState(false)
   const [neighbors, setNeighbors] = useState({ prev: null, next: null })
+  const [listTone, setListTone] = useState(() => (listId ? loadListTone(listId, songId) : null))
+  const [metroOn, setMetroOn] = useState(false)
+  const [bpm, setBpm] = useState(() => {
+    const n = Number(loadSettings().bpm)
+    return Number.isFinite(n) ? Math.max(40, Math.min(240, Math.round(n))) : 90
+  })
+  const [pulse, setPulse] = useState(false)
+  const metroRef = useRef(null)
+  const tapsRef = useRef([])
 
-  const { shift, capo, auto, speed, scale, instrument, hideTabs } = settings
+  const { auto, speed, scale, instrument, hideTabs } = settings
+  const shift = listId ? (listTone?.shift ?? 0) : settings.shift
+  const capo = listId ? (listTone?.capo ?? 0) : settings.capo
   const speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, Number(speed) || 0))
+  const scaleIdx = clampScale(scale)
   const eff = shift - capo
-  const fontSize = SIZES[scale]
+  const fontSize = SIZES[scaleIdx]
   const pxSpeed = SPEEDS[speedIdx]
 
   const persist = (patch) => {
@@ -129,6 +169,24 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
       } catch {}
       return next
     })
+  }
+
+  const persistTone = (patch) => {
+    if (listId && songId) {
+      setListTone((prev) => {
+        const next = { shift: 0, capo: 0, ...(prev || {}), ...patch }
+        updateListSongTone(listId, songId, next).catch(() => {})
+        return next
+      })
+      return
+    }
+    persist(patch)
+  }
+
+  const persistBpm = (value) => {
+    const n = Math.max(40, Math.min(240, Math.round(Number(value) || 90)))
+    setBpm(n)
+    persist({ bpm: n })
   }
 
   useEffect(() => {
@@ -145,6 +203,14 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
         if (user) isFavorite(s.id).then(setFav)
         setStatus('ok')
       } catch (e) {
+        const cached = readCachedSong(songId)
+        if (cached) {
+          setSong(cached)
+          recordRecentSong(cached, user?.id)
+          if (user) isFavorite(cached.id).then(setFav)
+          setStatus('ok')
+          return
+        }
         setMessage(e?.message || 'Não foi possível carregar esta cifra.')
         setStatus('error')
       }
@@ -184,10 +250,47 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
   }, [listId, songId, playlistIds])
 
   useEffect(() => {
+    if (!listId || !songId) {
+      setListTone(null)
+      return
+    }
+    setListTone(loadListTone(listId, songId))
+    getListWithSongs(listId)
+      .then((list) => {
+        const item = (list?.items || []).find((it) => it.song?.id === songId)
+        if (!item) return
+        setListTone({
+          shift: item.shift != null ? Number(item.shift) || 0 : 0,
+          capo: item.capo != null ? Number(item.capo) || 0 : 0
+        })
+      })
+      .catch(() => {})
+  }, [listId, songId])
+
+  useEffect(() => {
     if (!embedded) return
     document.body.classList.add('song-modal-open')
     return () => document.body.classList.remove('song-modal-open')
   }, [embedded])
+
+  useEffect(() => attachWakeLock(), [])
+
+  useEffect(() => {
+    const m = createMetronome()
+    metroRef.current = m
+    m.setOnBeat(() => {
+      setPulse(true)
+      setTimeout(() => setPulse(false), 90)
+    })
+    return () => {
+      m.stop()
+      metroRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    metroRef.current?.setBpm(bpm)
+  }, [bpm])
 
   useEffect(() => {
     if (!auto) return
@@ -303,8 +406,33 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
 
   const pickKey = (keyName) => {
     if (!song?.tone_root) return
-    persist({ shift: shiftToKey(song.tone_root, keyName, capo) })
+    persistTone({ shift: shiftToKey(song.tone_root, keyName, capo) })
     setToneOpen(false)
+  }
+
+  const toggleMetro = () => {
+    const m = metroRef.current
+    if (!m) return
+    if (metroOn) {
+      m.stop()
+      setMetroOn(false)
+    } else {
+      m.setBpm(bpm)
+      m.start()
+      setMetroOn(true)
+    }
+  }
+
+  const onTapTempo = () => {
+    const { taps, bpm: next } = tapTempo(tapsRef.current)
+    tapsRef.current = taps
+    if (next) persistBpm(next)
+    const m = metroRef.current
+    m?.setBpm(next || bpm)
+    if (!metroOn) {
+      m?.start()
+      setMetroOn(true)
+    }
   }
 
   const shareText = () => {
@@ -420,21 +548,41 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
   return (
     <div id="presentation-root" className={`song-page${embedded ? ' song-page-embed' : ''}`} style={{ fontSize: `${fontSize}px` }}>
       <header className="song-head">
-        <button className="icon-btn" onClick={goBack} aria-label="Voltar">
-          <Icon name="back" size={22} />
+        <button className="icon-btn sm" onClick={goBack} aria-label="Voltar">
+          <Icon name="back" size={18} />
         </button>
         <div className="song-head-titles">
           <h1>{song.title}</h1>
           <span>{song.artist}</span>
         </div>
-        <button className={`icon-btn ${fav ? 'fav-on' : ''}`} onClick={onFav} aria-label="Favoritar">
-          <Icon name="heart" size={22} />
+        {neighbors.prev || neighbors.next ? (
+          <div className="song-head-nav">
+            <button
+              className="icon-btn sm"
+              disabled={!neighbors.prev}
+              onClick={() => goNeighbor(neighbors.prev)}
+              aria-label="Música anterior da lista"
+            >
+              <Icon name="prev" size={16} />
+            </button>
+            <button
+              className="icon-btn sm"
+              disabled={!neighbors.next}
+              onClick={() => goNeighbor(neighbors.next)}
+              aria-label="Próxima música da lista"
+            >
+              <Icon name="next" size={16} />
+            </button>
+          </div>
+        ) : null}
+        <button className={`icon-btn sm ${fav ? 'fav-on' : ''}`} onClick={onFav} aria-label="Favoritar">
+          <Icon name="heart" size={18} />
         </button>
-        <button className="icon-btn" onClick={openLists} aria-label="Adicionar a uma lista">
-          <Icon name="plus" size={22} />
+        <button className="icon-btn sm" onClick={openLists} aria-label="Adicionar a uma lista">
+          <Icon name="plus" size={18} />
         </button>
-        <a className="icon-btn" href={youtubeHref} target="_blank" rel="noreferrer" aria-label="YouTube">
-          <Icon name="youtube" size={22} />
+        <a className="icon-btn sm" href={youtubeHref} target="_blank" rel="noreferrer" aria-label="YouTube">
+          <Icon name="youtube" size={18} />
         </a>
       </header>
 
@@ -476,13 +624,13 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
           </div>
           <span className="grow" />
           <button className="icon-btn sm" onClick={() => setShare(true)} aria-label="Compartilhar">
-            <Icon name="share" size={18} />
+            <Icon name="share" size={16} />
           </button>
           <button className="icon-btn sm" onClick={printPage} aria-label="Imprimir">
-            <Icon name="printer" size={18} />
+            <Icon name="printer" size={16} />
           </button>
           <button className="icon-btn sm" onClick={downloadTxt} aria-label="Baixar arquivo .txt">
-            <Icon name="download" size={18} />
+            <Icon name="download" size={16} />
           </button>
         </div>
         <div className="toolbar-row">
@@ -504,41 +652,41 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
             <button type="button" className="ctl-label ctl-link" onClick={() => song.tone_root && setToneOpen(true)}>
               Tom
             </button>
-            <button className="icon-btn sm" onClick={() => persist({ shift: Math.max(-11, shift - 1) })}>
-              <Icon name="a-down" size={18} />
+            <button className="icon-btn sm" onClick={() => persistTone({ shift: Math.max(-11, shift - 1) })}>
+              <Icon name="a-down" size={16} />
             </button>
             <button type="button" className="ctl-value ctl-link" onClick={() => song.tone_root && setToneOpen(true)}>
               {eff > 0 ? `+${eff}` : eff}
             </button>
-            <button className="icon-btn sm" onClick={() => persist({ shift: Math.min(11, shift + 1) })}>
-              <Icon name="a-up" size={18} />
+            <button className="icon-btn sm" onClick={() => persistTone({ shift: Math.min(11, shift + 1) })}>
+              <Icon name="a-up" size={16} />
             </button>
           </div>
 
           <div className="ctl">
             <span className="ctl-label">Capo</span>
-            <button className="icon-btn sm" onClick={() => persist({ capo: Math.max(0, capo - 1) })}>
-              <Icon name="a-down" size={18} />
+            <button className="icon-btn sm" onClick={() => persistTone({ capo: Math.max(0, capo - 1) })}>
+              <Icon name="a-down" size={16} />
             </button>
             <span className="ctl-value">{capo}</span>
-            <button className="icon-btn sm" onClick={() => persist({ capo: Math.min(9, capo + 1) })}>
-              <Icon name="a-up" size={18} />
+            <button className="icon-btn sm" onClick={() => persistTone({ capo: Math.min(9, capo + 1) })}>
+              <Icon name="a-up" size={16} />
             </button>
           </div>
 
           <div className="ctl grow">
             <span className="ctl-label">Letra</span>
-            <button className="icon-btn sm" onClick={() => persist({ scale: Math.max(0, scale - 1) })}>
-              <Icon name="a-down" size={18} />
+            <button className="icon-btn sm" onClick={() => persist({ scale: Math.max(0, scaleIdx - 1) })}>
+              <Icon name="a-down" size={16} />
             </button>
-            <span className="ctl-value">{SIZES[scale].toFixed(1).replace('.', ',')}</span>
-            <button className="icon-btn sm" onClick={() => persist({ scale: Math.min(2, scale + 1) })}>
-              <Icon name="a-up" size={18} />
+            <span className="ctl-value">{String(SIZES[scaleIdx]).replace('.', ',')}</span>
+            <button className="icon-btn sm" onClick={() => persist({ scale: Math.min(SIZES.length - 1, scaleIdx + 1) })}>
+              <Icon name="a-up" size={16} />
             </button>
           </div>
 
           {(shift !== 0 || capo !== 0) && (
-            <button className="btn ghost sm-btn" onClick={() => persist({ shift: 0, capo: 0 })}>
+            <button className="btn ghost sm-btn" onClick={() => persistTone({ shift: 0, capo: 0 })}>
               Resetar
             </button>
           )}
@@ -551,7 +699,7 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
               onClick={() => persist({ auto: !auto })}
               aria-label="Rolagem automática"
             >
-              <Icon name="repeat" size={18} />
+              <Icon name="repeat" size={16} />
             </button>
             <span className="ctl-label">{auto ? 'Rolando' : 'Auto-scroll'}</span>
           </div>
@@ -576,7 +724,30 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
             </button>
           )}
           <button className="icon-btn sm" onClick={togglePresent} aria-label="Tela cheia">
-            <Icon name="fullscreen" size={20} />
+            <Icon name="fullscreen" size={16} />
+          </button>
+        </div>
+
+        <div className="toolbar-row wrap">
+          <button
+            className={`icon-btn sm ${metroOn ? 'metro-on' : ''} ${pulse ? 'pulse' : ''}`}
+            onClick={toggleMetro}
+            aria-label="Metrônomo"
+          >
+            <Icon name="metronome" size={16} />
+          </button>
+          <span className="ctl-label">BPM</span>
+          <div className="ctl grow">
+            <button className="icon-btn sm" onClick={() => persistBpm(bpm - 2)} aria-label="BPM menor">
+              <Icon name="a-down" size={16} />
+            </button>
+            <span className="ctl-value">{bpm}</span>
+            <button className="icon-btn sm" onClick={() => persistBpm(bpm + 2)} aria-label="BPM maior">
+              <Icon name="a-up" size={16} />
+            </button>
+          </div>
+          <button className="btn ghost sm-btn" onClick={onTapTempo}>
+            Tap
           </button>
         </div>
       </div>
@@ -594,32 +765,11 @@ export function SongView({ songId, listId, playlistIds, onBack, onReplaceSong, e
         <span>Névoa Cifras</span>
       </footer>
 
-      {listId && (neighbors.prev || neighbors.next) && (
-        <div className="song-nav">
-          <button
-            className="song-nav-btn"
-            disabled={!neighbors.prev}
-            onClick={() => goNeighbor(neighbors.prev)}
-            aria-label="Música anterior da lista"
-          >
-            <Icon name="prev" size={22} />
-          </button>
-          <button
-            className="song-nav-btn"
-            disabled={!neighbors.next}
-            onClick={() => goNeighbor(neighbors.next)}
-            aria-label="Próxima música da lista"
-          >
-            <Icon name="next" size={22} />
-          </button>
-        </div>
-      )}
-
       {chord && (
-        <div className="sheet-backdrop" onClick={() => setChord(null)}>
-          <div className="sheet" onClick={(e) => e.stopPropagation()}>
-            <button className="icon-btn sheet-close" onClick={() => setChord(null)} aria-label="Fechar">
-              <Icon name="close" size={20} />
+        <div className="sheet-backdrop chord-card-backdrop" onClick={() => setChord(null)}>
+          <div className="sheet chord-card" onClick={(e) => e.stopPropagation()}>
+            <button className="icon-btn sm sheet-close" onClick={() => setChord(null)} aria-label="Fechar">
+              <Icon name="close" size={16} />
             </button>
             <ChordDiagram chord={chord} instrument={instrument} />
           </div>
@@ -744,5 +894,5 @@ export default function Song() {
   const { songId } = useParams()
   const [params] = useSearchParams()
   const listId = params.get('list')
-  return <SongView songId={songId} listId={listId} />
+  return <SongView key={`${listId || ''}-${songId}`} songId={songId} listId={listId} />
 }

@@ -3,6 +3,28 @@ import { useNavigate } from 'react-router-dom'
 import { Icon } from '../components/Icons'
 import { useAuth } from '../hooks/useAuth'
 import { getLists } from '../lib/store'
+import { getTheme, setTheme } from '../lib/theme'
+
+function ThemeCard() {
+  const [theme, setThemeState] = useState(getTheme)
+  const isLight = theme === 'light'
+  const toggle = () => {
+    const next = isLight ? 'dark' : 'light'
+    setTheme(next)
+    setThemeState(next)
+  }
+  return (
+    <div className="list-card" role="button" onClick={toggle}>
+      <span className="list-card-body">
+        <strong>Aparência</strong>
+        <span className="muted small">{isLight ? 'Modo claro' : 'Modo escuro'}</span>
+      </span>
+      <span className="theme-toggle" aria-hidden="true">
+        <Icon name={isLight ? 'sun' : 'moon'} size={18} />
+      </span>
+    </div>
+  )
+}
 
 export default function Profile() {
   const nav = useNavigate()
@@ -24,6 +46,16 @@ export default function Profile() {
         <button className="btn btn-primary" onClick={() => nav('/auth')}>
           Entrar / Criar conta
         </button>
+        <div className="stack auth-theme">
+          <ThemeCard />
+          <div className="list-card" role="button" onClick={() => nav('/chords')}>
+            <span className="list-card-body">
+              <strong>Dicionário de acordes</strong>
+              <span className="muted small">Formações de violão, guitarra e teclado</span>
+            </span>
+            <Icon name="book" size={20} className="ghost-icon" />
+          </div>
+        </div>
       </div>
     )
   }
@@ -37,6 +69,14 @@ export default function Profile() {
       </header>
 
       <div className="stack">
+        <ThemeCard />
+        <div className="list-card" role="button" onClick={() => nav('/chords')}>
+          <span className="list-card-body">
+            <strong>Dicionário de acordes</strong>
+            <span className="muted small">Formações de violão, guitarra e teclado</span>
+          </span>
+          <Icon name="book" size={20} className="ghost-icon" />
+        </div>
         <div className="list-card" role="button" onClick={() => nav('/lists')}>
           <span className="list-card-body">
             <strong>Minhas listas</strong>
