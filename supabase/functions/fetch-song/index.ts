@@ -321,9 +321,79 @@ function notFoundError() {
 
 function cleanTrackName(name) {
   return String(name || '')
-    .replace(/\s*\((?:live|ao vivo|acoustic|ac[uú]stico|remix|radio edit|oficial)[^)]*\)/gi, '')
+    .replace(/\s*\((?:live|ao vivo|acoustic|ac[uú]stico|remix|radio edit|oficial|espont[aâ]neo|playback)[^)]*\)/gi, '')
+    .replace(/\s*\[(?:live|ao vivo|playback|oficial|espont[aâ]neo)[^\]]*\]/gi, '')
+    .replace(/\s+\(feat\.?[^)]*\)/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
+}
+
+function parseJsonp(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
+  }
+  const start = raw.indexOf('(')
+  const end = raw.lastIndexOf(')')
+  if (start === -1 || end <= start) return null
+  try {
+    return JSON.parse(raw.slice(start + 1, end))
+  } catch {
+    return null
+  }
+}
+
+function mapCifraDoc(d) {
+  if (!d || String(d.t) !== '2') return null
+  if (Number(d.block) === 1) return null
+  const artist = String(d.art || '').trim()
+  const title = String(d.txt || '').trim()
+  const slug_artist = String(d.dns || '').trim()
+  const slug_title = String(d.url || '').trim()
+  if (!artist || !title || !slug_artist || !slug_title) return null
+  return {
+    artist,
+    title,
+    slug_artist,
+    slug_title,
+    image_url: d.imgm || null
+  }
+}
+
+function remoteHitKey(h) {
+  const sa = String(h.slug_artist || '').toLowerCase()
+  const st = String(h.slug_title || '')
+    .toLowerCase()
+    .replace(/-+$/, '')
+  if (sa && st) return `s:${sa}|${st}`
+  return `n:${String(h.artist || '').toLowerCase()}|${String(h.title || '').toLowerCase()}`
+}
+
+async function searchCifraClubHits(q, limit = 10) {
+  const query = String(q || '').trim()
+  if (!query) return []
+  const url = `https://solr.sscdn.co/cc/ac-mini?q=${encodeURIComponent(query)}`
+  const res = await fetch(url)
+  if (!res.ok) return []
+  const data = parseJsonp(await res.text())
+  const docs = data?.response?.docs || []
+  const out = []
+  const seen = new Set()
+  for (const d of docs) {
+    const hit = mapCifraDoc(d)
+    if (!hit) continue
+    const key = remoteHitKey(hit)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(hit)
+    if (out.length >= limit) break
+  }
+  return out
 }
 
 async function searchItunesHits(q) {
@@ -349,6 +419,52 @@ async function searchItunesHits(q) {
   return out
 }
 
+function scoreResolvedHit(hit, artist, title) {
+  const a = slugify(artist)
+  const t = slugify(cleanTrackName(title) || title)
+  if (!a || !t) return -1
+  const ha = slugify(hit.artist)
+  const ht = slugify(hit.title)
+  const sa = slugify(hit.slug_artist)
+  const st = slugify(hit.slug_title)
+  let score = 0
+  if (st === t || ht === t) score += 50
+  else if (st.startsWith(t) || t.startsWith(st) || ht.startsWith(t) || t.startsWith(ht)) score += 20
+  else return -1
+  if (sa === a || ha === a) score += 40
+  const aliases = String(hit.artist).match(/\(([^)]+)\)/g) || []
+  for (const raw of aliases) {
+    const inner = slugify(raw.slice(1, -1))
+    if (!inner) continue
+    if (inner === a || inner.includes(a) || a.includes(inner)) score += 40
+  }
+  if (ha.includes(a) || a.includes(ha) || sa.includes(a) || a.includes(sa)) score += 25
+  return score
+}
+
+async function resolveCifraSlugs(artist, title) {
+  const queries = [`${artist} ${title}`, `${title} ${artist}`, title]
+  let best = null
+  let bestScore = 59
+  for (const q of queries) {
+    let hits = []
+    try {
+      hits = await searchCifraClubHits(q, 12)
+    } catch {
+      continue
+    }
+    for (const hit of hits) {
+      const score = scoreResolvedHit(hit, artist, title)
+      if (score > bestScore) {
+        bestScore = score
+        best = hit
+      }
+    }
+    if (best && bestScore >= 90) break
+  }
+  return best
+}
+
 async function searchHits(client, q) {
   const query = String(q || '').trim()
   if (query.length < 2) {
@@ -369,22 +485,38 @@ async function searchHits(client, q) {
   const merged = []
   const seen = new Set()
   for (const row of local || []) {
-    const key = `${String(row.artist).toLowerCase()}|${String(row.title).toLowerCase()}`
+    const key = remoteHitKey(row)
     if (seen.has(key)) continue
     seen.add(key)
     merged.push(row)
   }
 
   try {
-    for (const hit of await searchItunesHits(query)) {
-      const key = `${hit.artist.toLowerCase()}|${hit.title.toLowerCase()}`
+    for (const hit of await searchCifraClubHits(query, 10)) {
+      const key = remoteHitKey(hit)
       if (seen.has(key)) continue
       seen.add(key)
       merged.push(hit)
       if (merged.length >= 10) break
     }
   } catch {
-    // iTunes indisponível: devolve só o catálogo
+    // índice do Cifra Club indisponível: cai no iTunes
+  }
+
+  if (merged.length < 10) {
+    try {
+      for (const hit of await searchItunesHits(query)) {
+        const resolved = await resolveCifraSlugs(hit.artist, hit.title)
+        if (!resolved) continue
+        const key = remoteHitKey(resolved)
+        if (seen.has(key)) continue
+        seen.add(key)
+        merged.push(resolved)
+        if (merged.length >= 10) break
+      }
+    } catch {
+      // iTunes indisponível: devolve o que já tem
+    }
   }
 
   return { hits: merged.slice(0, 10), source: merged.length ? 'search' : 'empty' }
@@ -500,6 +632,8 @@ Deno.serve(async (req) => {
     const q = String(body.q || '').trim()
     const artist = String(body.artist || '').trim()
     const title = String(body.title || '').trim()
+    const requestedArtistSlug = String(body.slug_artist || '').trim()
+    const requestedTitleSlug = String(body.slug_title || '').trim()
     const version = ['original', 'simplificada'].includes(body.version) ? body.version : 'original'
 
     if (!serviceKey) {
@@ -532,39 +666,59 @@ Deno.serve(async (req) => {
       })
     }
 
-    const slugArtist = asSlug(artist)
-    const slugTitle = asSlug(title)
+    const slugArtist = asSlug(requestedArtistSlug || artist)
+    const slugTitle = asSlug(requestedTitleSlug || cleanTrackName(title) || title)
 
-    // 1. já temos no catálogo? (tenta variantes: me-ama e me-ama-)
-    let cached = null
-    for (const a of slugArtistVariants(slugArtist)) {
-      for (const t of slugTitleVariants(slugTitle)) {
-        const { data } = await admin
-          .from('songs')
-          .select('*')
-          .eq('slug_artist', a)
-          .eq('slug_title', t)
-          .eq('version', version)
-          .maybeSingle()
-        if (data) {
-          cached = data
-          break
+    async function findCached(artistSlug, titleSlug) {
+      for (const a of slugArtistVariants(artistSlug)) {
+        for (const t of slugTitleVariants(titleSlug)) {
+          const { data } = await admin
+            .from('songs')
+            .select('*')
+            .eq('slug_artist', a)
+            .eq('slug_title', t)
+            .eq('version', version)
+            .maybeSingle()
+          if (data) return data
         }
       }
-      if (cached) break
+      return null
     }
+
+    // 1. já temos no catálogo? (tenta variantes: me-ama e me-ama-)
+    const cached = await findCached(slugArtist, slugTitle)
     if (cached) {
       return new Response(
-        JSON.stringify({ source: 'cache', song: { ...cached, content: JSON.parse(cached.content) } }),
+        JSON.stringify({ source: 'cache', song: decodeRow(cached) }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // 2. não: raspa, salva e devolve
-    const scraped = await scrapeSong({ slugArtist, slugTitle, version })
+    // 2. raspa; se o slug do iTunes não existir no Cifra Club, resolve pelo índice
+    let scraped
+    try {
+      scraped = await scrapeSong({ slugArtist, slugTitle, version })
+    } catch (err) {
+      if (err.status !== 404) throw err
+      const resolved = await resolveCifraSlugs(artist, title)
+      if (!resolved) throw err
+      const resolvedCache = await findCached(resolved.slug_artist, resolved.slug_title)
+      if (resolvedCache) {
+        return new Response(
+          JSON.stringify({ source: 'cache', song: decodeRow(resolvedCache) }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
+      scraped = await scrapeSong({
+        slugArtist: resolved.slug_artist,
+        slugTitle: resolved.slug_title,
+        version,
+        resolved: true
+      })
+    }
     const song = await upsertSong(admin, scraped)
     return new Response(
-      JSON.stringify({ source: 'scraped', song: { ...song, content: JSON.parse(song.content) } }),
+      JSON.stringify({ source: 'scraped', song: decodeRow(song) }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   } catch (err) {
