@@ -31,11 +31,15 @@ export async function signInWithLogin(identifier, password) {
   if (error) throw new Error('Usuário ou senha inválidos.')
 }
 
-export async function signInWithGoogle() {
+export async function signInWithGoogle(next) {
+  const base = authRedirectUrl()
+  const redirectTo = next
+    ? `${base}#${next.startsWith('/') ? next : `/${next}`}`
+    : base
   const { error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
-      redirectTo: authRedirectUrl(),
+      redirectTo,
       queryParams: { prompt: 'select_account' }
     }
   })
@@ -97,14 +101,20 @@ export async function signUpWithUsername(email, password, username) {
 export async function searchSongsLocal(q, limit = 30) {
   q = String(q || '').trim()
   if (!q) return []
-  const esc = q.replace(/[\\%_]/g, (c) => `\\${c}`)
-  const { data, error } = await supabase
+  const tokens = q.replace(/[\\%_*(),]/g, ' ').split(/\s+/).filter(Boolean)
+  if (!tokens.length) return []
+  let query = supabase
     .from('songs')
     .select('id, artist, title, slug_artist, slug_title, youtube_url, image_url, tone_root')
     .eq('version', 'original')
-    .or(`artist.ilike.%${esc}%,title.ilike.%${esc}%`)
-    .order('created_at', { ascending: false })
-    .limit(limit)
+  if (tokens.length === 1) {
+    const t = tokens[0]
+    query = query.or(`artist.ilike.*${t}*,title.ilike.*${t}*`)
+  } else {
+    const parts = tokens.map((t) => `or(artist.ilike.*${t}*,title.ilike.*${t}*)`)
+    query = query.or(`and(${parts.join(',')})`)
+  }
+  const { data, error } = await query.order('created_at', { ascending: false }).limit(limit)
   if (error) throw error
   return data || []
 }
@@ -201,9 +211,12 @@ export function parseSongContent(song) {
 // ------------------------- Listas -------------------------
 
 export async function getLists() {
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return []
   const { data, error } = await supabase
     .from('lists')
     .select('*, list_songs(count)')
+    .eq('user_id', user.id)
     .order('created_at', { ascending: false })
   if (error) throw error
   return (data || []).map((l) => ({ ...l, count: l.list_songs?.[0]?.count ?? 0 }))
@@ -263,6 +276,72 @@ export async function getListWithSongs(id) {
       const shift = it.shift != null ? Number(it.shift) || 0 : Number(local?.shift) || 0
       const capo = it.capo != null ? Number(it.capo) || 0 : Number(local?.capo) || 0
       return { ...it, song, shift, capo }
+    })
+  }
+}
+
+function makeShareToken() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    const v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
+
+export async function shareList(id) {
+  const { data, error } = await supabase
+    .from('lists')
+    .select('share_token')
+    .eq('id', id)
+    .maybeSingle()
+  if (error) throw error
+  const token = data?.share_token || makeShareToken()
+  const { error: e2 } = await supabase
+    .from('lists')
+    .update({ share_token: token, is_public: true, updated_at: new Date().toISOString() })
+    .eq('id', id)
+  if (e2) throw e2
+  return token
+}
+
+export async function unshareList(id) {
+  const { error } = await supabase
+    .from('lists')
+    .update({ is_public: false, updated_at: new Date().toISOString() })
+    .eq('id', id)
+  if (error) throw error
+}
+
+// lê uma lista compartilhada (modo leitura). O tom exibido prioriza a
+// preferência local do leitor (toneScope) sobre o tom salvo pelo dono.
+export async function getSharedList(token, toneScope) {
+  if (!token) return null
+  const { data: list, error } = await supabase
+    .from('lists')
+    .select('id, name, share_token, is_public, created_at, updated_at')
+    .eq('share_token', token)
+    .eq('is_public', true)
+    .maybeSingle()
+  if (error) throw error
+  if (!list) return null
+  const { data, error: e2 } = await supabase
+    .from('list_songs')
+    .select(
+      'id, position, shift, capo, songs(id, artist, title, slug_artist, slug_title, youtube_url, image_url, tone_root, version)'
+    )
+    .eq('list_id', list.id)
+    .order('position', { ascending: true })
+  if (e2) throw e2
+  const tones = loadListToneMap(toneScope || list.id)
+  const { id: _listId, ...meta } = list
+  return {
+    ...meta,
+    items: (data || []).map((it) => {
+      const local = it.song?.id ? tones[it.song.id] : null
+      const shift = local ? Number(local.shift) || 0 : it.shift != null ? Number(it.shift) || 0 : 0
+      const capo = local ? Number(local.capo) || 0 : it.capo != null ? Number(it.capo) || 0 : 0
+      return { ...it, shift, capo }
     })
   }
 }
